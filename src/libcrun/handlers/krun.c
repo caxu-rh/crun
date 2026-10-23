@@ -754,7 +754,7 @@ libkrun_configure_network (void *cookie, libcrun_container_t *container, libcrun
   char fd_as_str[16];
   int use_passt;
   int argv_idx;
-  int status;
+  int status = 0;
   int null;
   int ret;
 
@@ -809,7 +809,13 @@ libkrun_configure_network (void *cookie, libcrun_container_t *container, libcrun
 
   pid = fork ();
   if (pid < 0)
-    return crun_make_error (err, errno, "fork passt");
+    {
+      int saved_errno = errno;
+
+      close_and_reset (&kconf->passt_fds[FD_PAIR_PARENT]);
+      close_and_reset (&kconf->passt_fds[FD_PAIR_CHILD]);
+      return crun_make_error (err, saved_errno, "fork passt");
+    }
   else if (pid == 0)
     {
       runtime_spec_schema_config_schema *def = container->container_def;
@@ -848,12 +854,22 @@ libkrun_configure_network (void *cookie, libcrun_container_t *container, libcrun
       _exit (EXIT_FAILURE);
     }
 
-  close (kconf->passt_fds[FD_PAIR_CHILD]);
+  close_and_reset (&kconf->passt_fds[FD_PAIR_CHILD]);
 
   // Wait for passt to daemonize itself.
-  waitpid (pid, &status, 0);
+  ret = waitpid_ignore_stopped (pid, &status, 0);
+  if (UNLIKELY (ret < 0))
+    {
+      int saved_errno = errno;
+
+      close_and_reset (&kconf->passt_fds[FD_PAIR_PARENT]);
+      return crun_make_error (err, saved_errno, "wait for passt");
+    }
   if (! (WIFEXITED (status)) || WEXITSTATUS (status) != 0)
-    return crun_make_error (err, 0, "start passt");
+    {
+      close_and_reset (&kconf->passt_fds[FD_PAIR_PARENT]);
+      return crun_make_error (err, 0, "start passt");
+    }
 
   return 0;
 }
